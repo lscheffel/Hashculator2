@@ -6,7 +6,7 @@ import os
 import subprocess
 import sys
 
-# Caminho do banco de dados
+# Caminho do banco de dados e main.py
 db_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'video_data.db')
 main_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'main.py')
 
@@ -40,6 +40,9 @@ def load_data_from_db():
             item['duration_seconds'] = round(item['duration_seconds'], 2) if item['duration_seconds'] else 0
             item['fps'] = round(item['fps'], 2) if item['fps'] else 0
             item['bitrate_total_kbps'] = item['bitrate_total_kbps'] if item['bitrate_total_kbps'] else 0
+            item['hash'] = item['hash'] or ''  # Evita None
+            item['resolution'] = item['resolution'] or ''
+            item['video_codec'] = item['video_codec'] or ''
         return data
     except Exception as e:
         messagebox.showerror("Erro", f"Falha ao carregar dados do banco:\n{e}")
@@ -159,11 +162,10 @@ def sort_column(tree, col, reverse, columns):
 def adjust_column_widths(tree, columns, data):
     font = tkfont.nametofont("TkDefaultFont")
     max_widths = {}
-    min_width = 50  # Largura mínima em pixels
-    max_width = 300  # Largura máxima em pixels
+    min_width = 50
+    max_width = 300
     
     for col in columns:
-        # Medir largura do título
         title_width = font.measure(col) // 8
         max_widths[col] = title_width
     
@@ -174,7 +176,7 @@ def adjust_column_widths(tree, columns, data):
             max_widths[col] = max(max_widths[col], width)
     
     for col in columns:
-        width = max(min_width, min(max_width, max_widths[col] + 10))  # Adiciona padding
+        width = max(min_width, min(max_width, max_widths[col] + 10))
         tree.column(col, width=width, stretch=False)
 
 def refresh_db(tree, columns, display_columns, filters, filtered_stats_label, stat_frame):
@@ -215,10 +217,9 @@ def run_visualization():
 
     stats = get_common_stats(data)
 
-    # Configurar estilo das scrollbars
     style = ttk.Style()
-    style.configure("Custom.Vertical.TScrollbar", width=16)  # Aumenta largura em 2px (padrão ~14)
-    style.configure("Custom.Horizontal.TScrollbar", height=16)  # Aumenta altura em 2px (padrão ~14)
+    style.configure("Custom.Vertical.TScrollbar", width=16)
+    style.configure("Custom.Horizontal.TScrollbar", height=16)
 
     stats_container = ttk.Frame(root)
     stats_container.pack(fill="x", padx=10, pady=5)
@@ -294,7 +295,6 @@ def run_visualization():
 
     tree.bind("<Double-1>", on_double_click)
 
-    # Frame para botões
     button_frame = ttk.Frame(root)
     button_frame.pack(fill="x", padx=10, pady=5)
 

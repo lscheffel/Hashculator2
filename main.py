@@ -17,7 +17,6 @@ ffprobe_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ffprobe
 def init_database():
     conn = sqlite3.connect(db_path, check_same_thread=False)
     c = conn.cursor()
-    # Verificar se a tabela já existe
     c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='files'")
     if not c.fetchone():
         c.execute('''
@@ -62,7 +61,7 @@ def calculate_hash(file_path, max_bytes=2*1024*1024):
                     sha256.update(byte_block)
                     bytes_read += len(byte_block)
         return sha256.hexdigest()
-    except Exception:
+    except Exception as e:
         return None
 
 def get_video_metadata(file_path):
@@ -71,19 +70,31 @@ def get_video_metadata(file_path):
             return {"error": "ffprobe.exe não encontrado no diretório do aplicativo"}
         
         normalized_path = os.path.normpath(file_path)
-        if any(ord(char) > 127 for char in normalized_path) and os.name == 'nt':
-            normalized_path = '\\?\\' + normalized_path.replace('/', '\\')
+        if os.name == 'nt':
+            normalized_path = '\\\\?\\' + normalized_path.replace('/', '\\')
         
         cmd = [
             ffprobe_path,
-            "-v", "quiet",
+            "-v", "error",
             "-print_format", "json",
             "-show_format",
             "-show_streams",
+            "-show_error",
+            "-analyzeduration", "10000000",  # 10 segundos
+            "-probesize", "10000000",  # 10 MB
+            "-err_detect", "aggressive",
+            "-fflags", "+ignidx",
+            "-max_ts_probe", "50",
             normalized_path
         ]
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        metadata = json.loads(result.stdout)
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        if result.returncode != 0:
+            return {"error": f"Erro no ffprobe: {result.stderr}"}
+        
+        try:
+            metadata = json.loads(result.stdout)
+        except json.JSONDecodeError as e:
+            return {"error": f"JSON inválido retornado pelo ffprobe: {e}"}
         
         extracted = {}
         video_stream = next((stream for stream in metadata.get('streams', []) if stream['codec_type'] == 'video'), None)
@@ -95,7 +106,7 @@ def get_video_metadata(file_path):
                     num, denom = map(int, video_stream['r_frame_rate'].split('/'))
                     extracted['fps'] = num / denom if denom != 0 else 0
                 except (ValueError, ZeroDivisionError):
-                    pass
+                    extracted['fps'] = 0
             if 'codec_name' in video_stream:
                 extracted['video_codec'] = video_stream['codec_name']
         
@@ -104,14 +115,19 @@ def get_video_metadata(file_path):
             try:
                 extracted['duration_seconds'] = float(format_data['duration'])
             except ValueError:
-                pass
+                extracted['duration_seconds'] = 0
         if 'bit_rate' in format_data:
             try:
                 extracted['bitrate_total_kbps'] = int(format_data['bit_rate']) // 1000
             except ValueError:
-                pass
+                extracted['bitrate_total_kbps'] = 0
+        
+        if metadata.get('error'):
+            return {"error": f"Arquivo corrompido: {metadata['error']}"}
         
         return extracted if extracted else {"error": "Nenhum metadado relevante encontrado"}
+    except subprocess.TimeoutExpired:
+        return {"error": "Timeout ao processar arquivo (60 segundos)"}
     except Exception as e:
         return {"error": f"Erro ao extrair metadados: {str(e)}"}
 
@@ -157,6 +173,8 @@ def save_to_db(data):
                      [data['file_id']] + list(update_fields.values()))
         
         conn.commit()
+    except Exception as e:
+        print(f"Erro ao salvar no DB: {e}")
     finally:
         conn.close()
 
@@ -283,7 +301,7 @@ def process_folder(folder_path, text_widget, messages, lock, btn, step=1):
     failed = 0
     skipped = 0
     
-    with ThreadPoolExecutor(max_workers=8) as executor:  # Aumentado para 8 workers
+    with ThreadPoolExecutor(max_workers=6) as executor:  # Reduzido para 4 workers
         futures = [executor.submit(process_file, file_path, step, messages, lock) for file_path in video_files]
         for i, future in enumerate(futures):
             try:
@@ -307,26 +325,26 @@ def process_folder(folder_path, text_widget, messages, lock, btn, step=1):
         with lock:
             messages.append("Iniciando segunda etapa - coleta de hash\n")
         processed, failed, skipped = 0, 0, 0
- 
-        with ThreadPoolExecutor(max_workers=8) as executor:  # Aumentado para 8 workers
-                futures = [executor.submit(process_file, file_path, 2, messages, lock) for file_path in video_files]
-                for i, future in enumerate(futures):
-                    try:
-                        result = future.result(timeout=30)
-                        if result:
-                            processed += 1
-                        else:
-                            skipped += 1
-                        with lock:
-                            messages.append(f"Processando: {i+1}/{len(video_files)} (OK: {processed}, Erros: {failed}, Pulados: {skipped})\n")
-                    except TimeoutError:
-                        failed += 1
-                        with lock:
-                            messages.append(f"Timeout ao processar arquivo {i+1}\n")
-                    except Exception as e:
-                        failed += 1
-                        with lock:
-                            messages.append(f"Erro ao processar arquivo {i+1}: {e}\n")
+        
+        with ThreadPoolExecutor(max_workers=6) as executor:
+            futures = [executor.submit(process_file, file_path, 2, messages, lock) for file_path in video_files]
+            for i, future in enumerate(futures):
+                try:
+                    result = future.result(timeout=30)
+                    if result:
+                        processed += 1
+                    else:
+                        skipped += 1
+                    with lock:
+                        messages.append(f"Processando: {i+1}/{len(video_files)} (OK: {processed}, Erros: {failed}, Pulados: {skipped})\n")
+                except TimeoutError:
+                    failed += 1
+                    with lock:
+                        messages.append(f"Timeout ao processar arquivo {i+1}\n")
+                except Exception as e:
+                    failed += 1
+                    with lock:
+                        messages.append(f"Erro ao processar arquivo {i+1}: {e}\n")
     
     with lock:
         messages.append(f"\nProcessados {processed} vídeos. Dados salvos em {db_path}\n")
